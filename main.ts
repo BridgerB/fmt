@@ -400,6 +400,18 @@ async function runPgFormat(
 }
 
 /**
+ * Checks if Cargo.toml exists in the directory
+ */
+async function hasCargoToml(dir: string): Promise<boolean> {
+  try {
+    await Deno.stat(`${dir}/Cargo.toml`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Runs rustfmt for formatting Rust files
  */
 async function runRustFmt(
@@ -416,44 +428,78 @@ async function runRustFmt(
 
   console.log(`Found ${rustFiles.length} Rust file(s)`);
 
-  if (!await isCommandAvailable("rustfmt")) {
-    return {
-      success: false,
-      error:
-        "rustfmt not found. Install with 'nix-shell -p rustfmt' or use the flake.",
-    };
-  }
+  // Check if this is a Cargo project
+  const isCargoProject = await hasCargoToml(dir);
 
-  console.log(checkMode ? "Checking formatting..." : "Formatting files...");
-
-  const formatPromises = rustFiles.map(async (file) => {
-    if (checkMode) {
-      const result = await runCommand(
-        "rustfmt",
-        ["--check", file],
-        dir,
-        true,
-      );
-      if (!result.success) {
-        console.log(`Needs formatting: ${file}`);
-        return false;
-      }
-      return true;
-    } else {
-      console.log(`Formatting: ${file}`);
-      const result = await runCommand("rustfmt", [file], dir);
-      return result.success;
+  if (isCargoProject) {
+    // Use cargo fmt for Cargo projects (respects Cargo.toml edition)
+    if (!await isCommandAvailable("cargo")) {
+      return {
+        success: false,
+        error:
+          "cargo not found. Install with 'nix-shell -p cargo' or use the flake.",
+      };
     }
-  });
 
-  const results = await Promise.all(formatPromises);
-  const allSucceeded = results.every((r) => r);
+    console.log(checkMode ? "Checking formatting..." : "Formatting files...");
+    const args = checkMode ? ["fmt", "--", "--check"] : ["fmt"];
+    const result = await runCommand("cargo", args, dir);
 
-  if (!allSucceeded) {
-    return {
-      success: false,
-      error: checkMode ? "Rust files need formatting" : "Rust formatting failed",
-    };
+    if (!result.success) {
+      return {
+        success: false,
+        error: checkMode
+          ? "Rust files need formatting"
+          : "Rust formatting failed",
+      };
+    }
+  } else {
+    // Fall back to rustfmt with edition 2024 for standalone files
+    if (!await isCommandAvailable("rustfmt")) {
+      return {
+        success: false,
+        error:
+          "rustfmt not found. Install with 'nix-shell -p rustfmt' or use the flake.",
+      };
+    }
+
+    console.log(checkMode ? "Checking formatting..." : "Formatting files...");
+
+    const formatPromises = rustFiles.map(async (file) => {
+      if (checkMode) {
+        const result = await runCommand(
+          "rustfmt",
+          ["--edition", "2024", "--check", file],
+          dir,
+          true,
+        );
+        if (!result.success) {
+          console.log(`Needs formatting: ${file}`);
+          return false;
+        }
+        return true;
+      } else {
+        console.log(`Formatting: ${file}`);
+        const result = await runCommand(
+          "rustfmt",
+          ["--edition", "2024", file],
+          dir,
+        );
+        return result.success;
+      }
+    });
+
+    const results = await Promise.all(formatPromises);
+    const allSucceeded = results.every((r) => r);
+
+    if (!allSucceeded) {
+      return {
+        success: false,
+        error: checkMode
+          ? "Rust files need formatting"
+          : "Rust formatting failed",
+      };
+    }
   }
 
   return { success: true };
