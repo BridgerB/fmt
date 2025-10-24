@@ -1,6 +1,6 @@
 /**
  * Multi-language parallel code formatter
- * Formats code using appropriate tools: Deno, Alejandra (Nix), Go, and PostgreSQL formatters
+ * Formats code using appropriate tools: Deno, Alejandra (Nix), Go, PostgreSQL, and Rust formatters
  */
 
 /** Configuration file structure */
@@ -49,6 +49,7 @@ SUPPORTED LANGUAGES:
     • Nix (via alejandra)
     • Go (via goimports/gofmt)
     • SQL (via pg_format)
+    • Rust (via rustfmt)
 
 CONFIGURATION:
     Create exclude-list.json in the same directory as the binary to exclude paths:
@@ -399,6 +400,66 @@ async function runPgFormat(
 }
 
 /**
+ * Runs rustfmt for formatting Rust files
+ */
+async function runRustFmt(
+  dir: string,
+  checkMode: boolean,
+): Promise<{ success: boolean; error?: string }> {
+  console.log("\n=== Rust Formatter (rustfmt) ===");
+
+  const rustFiles = await findFiles(dir, ".rs");
+  if (rustFiles.length === 0) {
+    console.log("No Rust files found. Skipping.");
+    return { success: true };
+  }
+
+  console.log(`Found ${rustFiles.length} Rust file(s)`);
+
+  if (!await isCommandAvailable("rustfmt")) {
+    return {
+      success: false,
+      error:
+        "rustfmt not found. Install with 'nix-shell -p rustfmt' or use the flake.",
+    };
+  }
+
+  console.log(checkMode ? "Checking formatting..." : "Formatting files...");
+
+  const formatPromises = rustFiles.map(async (file) => {
+    if (checkMode) {
+      const result = await runCommand(
+        "rustfmt",
+        ["--check", file],
+        dir,
+        true,
+      );
+      if (!result.success) {
+        console.log(`Needs formatting: ${file}`);
+        return false;
+      }
+      return true;
+    } else {
+      console.log(`Formatting: ${file}`);
+      const result = await runCommand("rustfmt", [file], dir);
+      return result.success;
+    }
+  });
+
+  const results = await Promise.all(formatPromises);
+  const allSucceeded = results.every((r) => r);
+
+  if (!allSucceeded) {
+    return {
+      success: false,
+      error: checkMode ? "Rust files need formatting" : "Rust formatting failed",
+    };
+  }
+
+  return { success: true };
+}
+
+/**
  * Main formatting workflow
  */
 async function run(checkMode: boolean): Promise<void> {
@@ -421,6 +482,7 @@ async function run(checkMode: boolean): Promise<void> {
     runAlejandra(cwd, checkMode),
     runGoFmt(cwd, checkMode),
     runPgFormat(cwd, checkMode),
+    runRustFmt(cwd, checkMode),
   ]);
 
   // Collect errors
@@ -430,6 +492,7 @@ async function run(checkMode: boolean): Promise<void> {
     "Alejandra",
     "Go formatter",
     "SQL formatter",
+    "Rust formatter",
   ];
 
   results.forEach((result, index) => {

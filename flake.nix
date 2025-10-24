@@ -22,6 +22,7 @@
           go
           gotools
           pgformatter
+          rustfmt
         ];
       in {
         packages = {
@@ -103,6 +104,7 @@
             go
             gotools
             pgformatter
+            rustfmt
             git
           ];
 
