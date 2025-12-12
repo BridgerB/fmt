@@ -24,6 +24,36 @@
           pgformatter
           rustfmt
         ];
+        denoVersion = pkgs.deno.version;
+
+        # Fetch the deno runtime binary needed for compile (as zip)
+        denortZip = pkgs.fetchurl {
+          url = "https://dl.deno.land/release/v${denoVersion}/denort-x86_64-unknown-linux-gnu.zip";
+          sha256 = "sha256-ZUmzB1FJYAOnYYvH4IMnAyLYDZhhOUmwrEAiNYAFuHQ=";
+        };
+
+        # Fixed-output derivation to fetch deno dependencies
+        denoDeps = pkgs.stdenv.mkDerivation {
+          pname = "fmt-deno-deps";
+          version = "1.0.0";
+          src = ./.;
+
+          nativeBuildInputs = [pkgs.deno pkgs.cacert];
+
+          buildPhase = ''
+            export HOME="$TMPDIR"
+            export DENO_DIR="$TMPDIR/deno"
+            deno cache main.ts
+          '';
+
+          installPhase = ''
+            cp -r $DENO_DIR $out
+          '';
+
+          outputHashMode = "recursive";
+          outputHashAlgo = "sha256";
+          outputHash = "sha256-fR4ihmkjvrgtnumHHoiLMD+jnS2dUXWCU9z61+Bndxo=";
+        };
       in {
         packages = {
           default = self.packages.${system}.fmt;
@@ -37,33 +67,30 @@
               makeWrapper
             ];
 
+            dontStrip = true;
+
             buildPhase = ''
+              export HOME="$TMPDIR"
               export DENO_DIR="$TMPDIR/deno"
-              ${pkgs.deno}/bin/deno check main.ts
+
+              # Copy cached deps (can't use read-only nix store directly)
+              cp -r ${denoDeps} $DENO_DIR
+              chmod -R u+w $DENO_DIR
+
+              # Copy the denort zip so deno compile finds it
+              mkdir -p $DENO_DIR/dl/release/v${denoVersion}
+              cp ${denortZip} $DENO_DIR/dl/release/v${denoVersion}/denort-x86_64-unknown-linux-gnu.zip
+
+              deno compile --cached-only --allow-run --allow-read --allow-env -o fmt main.ts
             '';
 
             installPhase = ''
-              # Install the TypeScript source
-              mkdir -p $out/bin $out/share/fmt
-              cp main.ts $out/share/fmt/main.ts
-
-              # Copy exclude-list.json to the bin directory (same dir as binary)
-              if [ -f exclude-list.json ]; then
-                cp exclude-list.json $out/bin/exclude-list.json
-              else
-                # Create default empty exclude-list.json
-                echo '{"excluded_paths":[]}' > $out/bin/exclude-list.json
-              fi
-
-              # Create wrapper script
-              cat > $out/bin/fmt << EOF
-              #!/bin/sh
-              exec ${pkgs.deno}/bin/deno run --allow-run --allow-read --allow-env $out/share/fmt/main.ts "\$@"
-              EOF
-              chmod +x $out/bin/fmt
+              mkdir -p $out/bin
+              cp fmt $out/bin/.fmt-wrapped
+              chmod +x $out/bin/.fmt-wrapped
 
               # Wrap it with the required formatter tools in PATH
-              wrapProgram $out/bin/fmt \
+              makeWrapper $out/bin/.fmt-wrapped $out/bin/fmt \
                 --prefix PATH : ${pkgs.lib.makeBinPath formatTools}
             '';
 
@@ -72,7 +99,7 @@
               homepage = "https://github.com/BridgerB/fmt";
               license = licenses.mit;
               mainProgram = "fmt";
-              platforms = platforms.all;
+              platforms = ["x86_64-linux"];
             };
           };
         };
@@ -109,14 +136,11 @@
           ];
 
           shellHook = ''
-            echo "Welcome to the fmt development shell!"
-            echo "Deno version: $(deno --version | head -n1)"
+            echo "fmt development shell"
             echo ""
-            echo "Available commands:"
-            echo "  deno run --allow-run --allow-read --allow-env main.ts       - Run formatter"
-            echo "  deno run --allow-run --allow-read --allow-env main.ts --check - Check formatting"
-            echo "  nix run                                                      - Run packaged version"
-            echo "  nix run .#check                                              - Check with packaged version"
+            echo "Commands:"
+            echo "  deno run --allow-run --allow-read --allow-env main.ts  - Run formatter"
+            echo "  deno compile --allow-run --allow-read --allow-env -o fmt main.ts  - Rebuild binary"
           '';
         };
       }

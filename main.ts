@@ -3,15 +3,13 @@
  * Formats code using appropriate tools: Deno, Alejandra (Nix), Go, PostgreSQL, and Rust formatters
  */
 
-/** Configuration file structure */
-interface Config {
-  excluded_paths: string[];
-}
+import { globToRegExp } from "jsr:@std/path@^1/glob-to-regexp";
 
-/** File detection result */
-interface FileCheckResult {
-  found: boolean;
-  count: number;
+/** Ignore pattern (parsed from .fmtignore) */
+interface IgnorePattern {
+  pattern: string;
+  regex: RegExp;
+  negated: boolean;
 }
 
 /** CLI arguments */
@@ -52,10 +50,11 @@ SUPPORTED LANGUAGES:
     • Rust (via rustfmt)
 
 CONFIGURATION:
-    Create exclude-list.json in the same directory as the binary to exclude paths:
-    {
-      "excluded_paths": ["/path/to/exclude"]
-    }
+    fmt automatically respects .gitignore patterns. Files ignored by git
+    will not be formatted.
+
+    The .gitignore file is searched for starting from the current directory
+    and walking up the directory tree.
 
 EXAMPLES:
     fmt              Format all files in current directory
@@ -64,59 +63,158 @@ EXAMPLES:
 }
 
 /**
- * Gets the path to the configuration file
+ * Searches up the directory tree for .gitignore
+ * Returns the path to the file and the directory it's in (project root)
  */
-function getConfigPath(): string {
-  const execPath = Deno.execPath();
-  const binaryDir = execPath.substring(0, execPath.lastIndexOf("/"));
-  return `${binaryDir}/exclude-list.json`;
-}
+async function findGitignore(
+  startDir: string,
+): Promise<{ filePath: string; rootDir: string } | null> {
+  let currentDir = startDir;
 
-/**
- * Loads the configuration file
- */
-async function loadConfig(): Promise<Config> {
-  const configPath = getConfigPath();
-
-  try {
-    const data = await Deno.readTextFile(configPath);
-    return JSON.parse(data) as Config;
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
-      return { excluded_paths: [] };
+  while (true) {
+    const filePath = `${currentDir}/.gitignore`;
+    try {
+      await Deno.stat(filePath);
+      return { filePath, rootDir: currentDir };
+    } catch {
+      // Not found, go up
     }
-    console.warn(`Warning: failed to load config: ${error}`);
-    return { excluded_paths: [] };
+
+    const parentDir = currentDir.substring(0, currentDir.lastIndexOf("/"));
+    if (parentDir === "" || parentDir === currentDir) {
+      // Reached root
+      return null;
+    }
+    currentDir = parentDir;
   }
 }
 
 /**
- * Checks if the given path should be excluded from formatting
+ * Parses a .fmtignore file and returns ignore patterns
  */
-async function isPathExcluded(currentPath: string): Promise<boolean> {
-  const config = await loadConfig();
-  const normalizedCurrent = await Deno.realPath(currentPath).catch(() =>
-    currentPath
-  );
+function parseIgnorePatterns(content: string): IgnorePattern[] {
+  const patterns: IgnorePattern[] = [];
 
-  for (const excludedPath of config.excluded_paths) {
-    try {
-      const normalizedExcluded = await Deno.realPath(excludedPath).catch(() =>
-        excludedPath
-      );
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
 
-      if (
-        normalizedCurrent === normalizedExcluded ||
-        normalizedCurrent.startsWith(normalizedExcluded + "/")
-      ) {
-        return true;
-      }
-    } catch {
+    // Skip empty lines and comments
+    if (trimmed === "" || trimmed.startsWith("#")) {
       continue;
     }
+
+    const negated = trimmed.startsWith("!");
+    const pattern = negated ? trimmed.slice(1) : trimmed;
+
+    // Convert gitignore-style pattern to regex
+    // If pattern doesn't start with /, it can match anywhere
+    // If pattern ends with /, it only matches directories
+    let globPattern = pattern;
+
+    // If pattern doesn't contain /, it matches anywhere in the tree
+    if (!pattern.includes("/")) {
+      globPattern = `**/${pattern}`;
+    } else if (pattern.startsWith("/")) {
+      // Leading slash means relative to root
+      globPattern = pattern.slice(1);
+    }
+
+    // If pattern ends with /, match directory and everything under it
+    if (globPattern.endsWith("/")) {
+      globPattern = `${globPattern}**`;
+    }
+
+    try {
+      const regex = globToRegExp(globPattern);
+      patterns.push({ pattern: trimmed, regex, negated });
+    } catch {
+      console.warn(`Warning: invalid ignore pattern: ${trimmed}`);
+    }
   }
 
-  return false;
+  return patterns;
+}
+
+/**
+ * Loads ignore patterns from .gitignore
+ */
+async function loadIgnorePatterns(startDir: string): Promise<{
+  patterns: IgnorePattern[];
+  rootDir: string;
+}> {
+  const result = await findGitignore(startDir);
+
+  if (!result) {
+    return { patterns: [], rootDir: startDir };
+  }
+
+  try {
+    const content = await Deno.readTextFile(result.filePath);
+    const patterns = parseIgnorePatterns(content);
+    return { patterns, rootDir: result.rootDir };
+  } catch (error) {
+    console.warn(`Warning: failed to read .gitignore: ${error}`);
+    return { patterns: [], rootDir: startDir };
+  }
+}
+
+/**
+ * Checks if a file path should be ignored based on patterns
+ * @param relativePath Path relative to the project root
+ * @param patterns Parsed ignore patterns
+ */
+function isIgnored(relativePath: string, patterns: IgnorePattern[]): boolean {
+  let ignored = false;
+
+  for (const { regex, negated } of patterns) {
+    if (regex.test(relativePath)) {
+      ignored = !negated;
+    }
+  }
+
+  return ignored;
+}
+
+/**
+ * Gets raw patterns from .gitignore for passing to deno fmt --ignore
+ */
+async function getRawIgnorePatterns(startDir: string): Promise<string[]> {
+  const result = await findGitignore(startDir);
+
+  if (!result) {
+    return [];
+  }
+
+  try {
+    const content = await Deno.readTextFile(result.filePath);
+    const patterns: string[] = [];
+
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      // Skip empty lines, comments, and negation patterns (deno fmt doesn't support those)
+      if (
+        trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith("!")
+      ) {
+        continue;
+      }
+      // Normalize patterns for deno fmt:
+      // - Remove leading slash (deno fmt treats all patterns as relative)
+      // - Convert /foo/* to foo/
+      let pattern = trimmed;
+      if (pattern.startsWith("/")) {
+        pattern = pattern.slice(1);
+      }
+      // Remove trailing /* as deno fmt ignores directories recursively
+      if (pattern.endsWith("/*")) {
+        pattern = pattern.slice(0, -1);
+      }
+      patterns.push(pattern);
+    }
+
+    return patterns;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -171,15 +269,28 @@ async function isCommandAvailable(name: string): Promise<boolean> {
 }
 
 /**
- * Recursively finds all files with the given extension
+ * Recursively finds all files with the given extension, respecting ignore patterns
  */
-async function findFiles(dir: string, ext: string): Promise<string[]> {
+async function findFiles(
+  dir: string,
+  ext: string,
+  patterns: IgnorePattern[] = [],
+  rootDir: string = dir,
+): Promise<string[]> {
   const files: string[] = [];
 
   async function walk(currentDir: string): Promise<void> {
     try {
       for await (const entry of Deno.readDir(currentDir)) {
         const fullPath = `${currentDir}/${entry.name}`;
+        const relativePath = fullPath.startsWith(rootDir + "/")
+          ? fullPath.slice(rootDir.length + 1)
+          : fullPath;
+
+        // Check if this path should be ignored
+        if (patterns.length > 0 && isIgnored(relativePath, patterns)) {
+          continue;
+        }
 
         if (entry.isDirectory) {
           await walk(fullPath);
@@ -194,20 +305,6 @@ async function findFiles(dir: string, ext: string): Promise<string[]> {
 
   await walk(dir);
   return files;
-}
-
-/**
- * Checks if the directory contains files with the given extension
- */
-async function hasFilesWithExt(
-  dir: string,
-  ext: string,
-): Promise<FileCheckResult> {
-  const files = await findFiles(dir, ext);
-  return {
-    found: files.length > 0,
-    count: files.length,
-  };
 }
 
 /**
@@ -230,9 +327,19 @@ async function runDenoFmt(
     };
   }
 
+  // Get ignore patterns to pass to deno fmt
+  const ignorePatterns = await getRawIgnorePatterns(dir);
+
   const args = checkMode
-    ? ["fmt", "--check", "--unstable-component", "."]
-    : ["fmt", "--unstable-component", "."];
+    ? ["fmt", "--check", "--unstable-component"]
+    : ["fmt", "--unstable-component"];
+
+  // Add ignore patterns if any
+  if (ignorePatterns.length > 0) {
+    args.push(`--ignore=${ignorePatterns.join(",")}`);
+  }
+
+  args.push(".");
 
   console.log(checkMode ? "Checking formatting..." : "Formatting files...");
   const result = await runCommand("deno", args, dir);
@@ -253,16 +360,18 @@ async function runDenoFmt(
 async function runAlejandra(
   dir: string,
   checkMode: boolean,
+  patterns: IgnorePattern[],
+  rootDir: string,
 ): Promise<{ success: boolean; error?: string }> {
   console.log("\n=== Nix Formatter (Alejandra) ===");
 
-  const { found, count } = await hasFilesWithExt(dir, ".nix");
-  if (!found) {
+  const nixFiles = await findFiles(dir, ".nix", patterns, rootDir);
+  if (nixFiles.length === 0) {
     console.log("No Nix files found. Skipping.");
     return { success: true };
   }
 
-  console.log(`Found ${count} Nix file(s)`);
+  console.log(`Found ${nixFiles.length} Nix file(s)`);
 
   if (!await isCommandAvailable("alejandra")) {
     return {
@@ -272,12 +381,22 @@ async function runAlejandra(
     };
   }
 
-  const args = checkMode ? ["--check", "."] : ["."];
   console.log(checkMode ? "Checking formatting..." : "Formatting files...");
 
-  const result = await runCommand("alejandra", args, dir);
+  // Format each file individually to respect ignore patterns
+  const formatPromises = nixFiles.map(async (file) => {
+    const args = checkMode ? ["--check", file] : [file];
+    const result = await runCommand("alejandra", args, dir, true);
+    if (!result.success && checkMode) {
+      console.log(`Needs formatting: ${file}`);
+    }
+    return result.success;
+  });
 
-  if (!result.success) {
+  const results = await Promise.all(formatPromises);
+  const allSucceeded = results.every((r) => r);
+
+  if (!allSucceeded) {
     return {
       success: false,
       error: checkMode ? "Nix files need formatting" : "Nix formatting failed",
@@ -293,16 +412,18 @@ async function runAlejandra(
 async function runGoFmt(
   dir: string,
   checkMode: boolean,
+  patterns: IgnorePattern[],
+  rootDir: string,
 ): Promise<{ success: boolean; error?: string }> {
   console.log("\n=== Go Formatter ===");
 
-  const { found, count } = await hasFilesWithExt(dir, ".go");
-  if (!found) {
+  const goFiles = await findFiles(dir, ".go", patterns, rootDir);
+  if (goFiles.length === 0) {
     console.log("No Go files found. Skipping.");
     return { success: true };
   }
 
-  console.log(`Found ${count} Go file(s)`);
+  console.log(`Found ${goFiles.length} Go file(s)`);
 
   // Try goimports first, fall back to gofmt
   const useGoimports = await isCommandAvailable("goimports");
@@ -316,24 +437,32 @@ async function runGoFmt(
     };
   }
 
-  if (checkMode) {
-    console.log("Checking formatting...");
-    const formatter = useGoimports ? "goimports" : "gofmt";
-    const result = await runCommand(formatter, ["-l", "."], dir, true);
+  const formatter = useGoimports ? "goimports" : "gofmt";
+  console.log(checkMode ? "Checking formatting..." : `Using ${formatter}...`);
 
-    if (result.output.trim().length > 0) {
-      console.log("Files that need formatting:");
-      console.log(result.output);
-      return { success: false, error: "Go files need formatting" };
+  // Format each file individually to respect ignore patterns
+  const formatPromises = goFiles.map(async (file) => {
+    if (checkMode) {
+      const result = await runCommand(formatter, ["-l", file], dir, true);
+      if (result.output.trim().length > 0) {
+        console.log(`Needs formatting: ${file}`);
+        return false;
+      }
+      return true;
+    } else {
+      const result = await runCommand(formatter, ["-w", file], dir);
+      return result.success;
     }
-  } else {
-    const formatter = useGoimports ? "goimports" : "gofmt";
-    console.log(`Using ${formatter}...`);
-    const result = await runCommand(formatter, ["-w", "."], dir);
+  });
 
-    if (!result.success) {
-      return { success: false, error: "Go formatting failed" };
-    }
+  const results = await Promise.all(formatPromises);
+  const allSucceeded = results.every((r) => r);
+
+  if (!allSucceeded) {
+    return {
+      success: false,
+      error: checkMode ? "Go files need formatting" : "Go formatting failed",
+    };
   }
 
   return { success: true };
@@ -345,10 +474,12 @@ async function runGoFmt(
 async function runPgFormat(
   dir: string,
   checkMode: boolean,
+  patterns: IgnorePattern[],
+  rootDir: string,
 ): Promise<{ success: boolean; error?: string }> {
   console.log("\n=== SQL Formatter (pgFormatter) ===");
 
-  const sqlFiles = await findFiles(dir, ".sql");
+  const sqlFiles = await findFiles(dir, ".sql", patterns, rootDir);
   if (sqlFiles.length === 0) {
     console.log("No SQL files found. Skipping.");
     return { success: true };
@@ -417,10 +548,12 @@ async function hasCargoToml(dir: string): Promise<boolean> {
 async function runRustFmt(
   dir: string,
   checkMode: boolean,
+  patterns: IgnorePattern[],
+  rootDir: string,
 ): Promise<{ success: boolean; error?: string }> {
   console.log("\n=== Rust Formatter (rustfmt) ===");
 
-  const rustFiles = await findFiles(dir, ".rs");
+  const rustFiles = await findFiles(dir, ".rs", patterns, rootDir);
   if (rustFiles.length === 0) {
     console.log("No Rust files found. Skipping.");
     return { success: true };
@@ -442,10 +575,22 @@ async function runRustFmt(
     }
 
     console.log(checkMode ? "Checking formatting..." : "Formatting files...");
-    const args = checkMode ? ["fmt", "--", "--check"] : ["fmt"];
-    const result = await runCommand("cargo", args, dir);
+    // For cargo projects, format individual files to respect ignore patterns
+    const formatPromises = rustFiles.map(async (file) => {
+      const args = checkMode
+        ? ["fmt", "--", "--check", file]
+        : ["fmt", "--", file];
+      const result = await runCommand("cargo", args, dir, true);
+      if (!result.success && checkMode) {
+        console.log(`Needs formatting: ${file}`);
+      }
+      return result.success;
+    });
 
-    if (!result.success) {
+    const results = await Promise.all(formatPromises);
+    const allSucceeded = results.every((r) => r);
+
+    if (!allSucceeded) {
       return {
         success: false,
         error: checkMode
@@ -511,9 +656,11 @@ async function runRustFmt(
 async function run(checkMode: boolean): Promise<void> {
   const cwd = Deno.cwd();
 
-  if (await isPathExcluded(cwd)) {
-    console.log(`Skipping: ${cwd} is in excluded paths`);
-    return;
+  // Load ignore patterns from .gitignore
+  const { patterns, rootDir } = await loadIgnorePatterns(cwd);
+
+  if (patterns.length > 0) {
+    console.log(`Using .gitignore from ${rootDir}`);
   }
 
   console.log(
@@ -525,10 +672,10 @@ async function run(checkMode: boolean): Promise<void> {
   // Run all formatters in parallel
   const results = await Promise.allSettled([
     runDenoFmt(cwd, checkMode),
-    runAlejandra(cwd, checkMode),
-    runGoFmt(cwd, checkMode),
-    runPgFormat(cwd, checkMode),
-    runRustFmt(cwd, checkMode),
+    runAlejandra(cwd, checkMode, patterns, rootDir),
+    runGoFmt(cwd, checkMode, patterns, rootDir),
+    runPgFormat(cwd, checkMode, patterns, rootDir),
+    runRustFmt(cwd, checkMode, patterns, rootDir),
   ]);
 
   // Collect errors

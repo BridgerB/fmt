@@ -1,16 +1,16 @@
 # fmt
 
 Parallel formatter for multiple languages: Deno
-(JS/TS/JSON/MD/CSS/HTML/YAML/etc), PostgreSQL, Go, Nix, and others.
+(JS/TS/JSON/MD/CSS/HTML/YAML/etc), PostgreSQL, Go, Nix, Rust, and others.
 
 ## Features
 
 - **Multi-language support**: Formats JavaScript, TypeScript, JSON, Markdown,
-  CSS, HTML, YAML, Nix, Go, and SQL files
+  CSS, HTML, YAML, Nix, Go, SQL, and Rust files
 - **Parallel execution**: Runs all formatters simultaneously for faster
   formatting
 - **Check mode**: Verify formatting without modifying files (useful for CI/CD)
-- **Exclude paths**: Skip formatting certain directories via configuration
+- **Respects .gitignore**: Automatically skips files ignored by git
 - **Nix packaging**: Reproducible builds with all dependencies included
 
 ## Installation
@@ -60,22 +60,15 @@ nix run github:BridgerB/fmt -- --help
 - **Nix**: via `alejandra`
 - **Go**: via `goimports`/`gofmt`
 - **SQL**: via `pg_format`
+- **Rust**: via `rustfmt`/`cargo fmt`
 
 ## Configuration
 
-Create an `exclude-list.json` file in the same directory as the binary to
-exclude specific paths:
+fmt automatically respects your `.gitignore` file. Any files or directories
+ignored by git will be skipped during formatting.
 
-```json
-{
-  "excluded_paths": [
-    "/path/to/directory/to/exclude",
-    "/another/path/to/exclude"
-  ]
-}
-```
-
-By default, an empty `exclude-list.json` is provided.
+The `.gitignore` is searched for starting from the current directory and walking
+up the directory tree.
 
 ## Nix Flake Apps
 
