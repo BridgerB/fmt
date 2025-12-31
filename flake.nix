@@ -39,7 +39,7 @@
       # Platform-specific hashes for denort binary
       # Update these when deno version changes
       denortHashes = {
-        "x86_64-unknown-linux-gnu" = "sha256-ZUmzB1FJYAOnYYvH4IMnAyLYDZhhOUmwrEAiNYAFuHQ=";
+        "x86_64-unknown-linux-gnu" = "sha256-qCuGkPfCb23wgFoRReAhCPQ3o6GtagWnIyuuAdqw7Ns=";
         "aarch64-unknown-linux-gnu" = "sha256-0000000000000000000000000000000000000000000=";
         "x86_64-apple-darwin" = "sha256-0000000000000000000000000000000000000000000=";
         "aarch64-apple-darwin" = "sha256-K4HfRWSZWkG7IDEVHOUKa4kqjwTlCJ9hFXD2mTmG3lg=";
@@ -71,7 +71,7 @@
 
         outputHashMode = "recursive";
         outputHashAlgo = "sha256";
-        outputHash = "sha256-E8p5fptGG1VvrrbXXgkJRwMIOHbljVID3tMgs1yTD94=";
+        outputHash = "sha256-8JAzQiI03CI60nvpcM2W+02yLdANrWRV9VIHWrNjWpI=";
       };
     in {
       default = self.packages.${system}.fmt;
