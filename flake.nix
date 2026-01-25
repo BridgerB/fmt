@@ -45,6 +45,15 @@
         "aarch64-apple-darwin" = "sha256-K4HfRWSZWkG7IDEVHOUKa4kqjwTlCJ9hFXD2mTmG3lg=";
       };
 
+      # Platform-specific hashes for deno deps cache
+      # Update these when dependencies change
+      denoDepsHashes = {
+        "x86_64-linux" = "sha256-0000000000000000000000000000000000000000000=";
+        "aarch64-linux" = "sha256-0000000000000000000000000000000000000000000=";
+        "x86_64-darwin" = "sha256-0000000000000000000000000000000000000000000=";
+        "aarch64-darwin" = "sha256-55DMyYtXKJG3Pu1M7Y5IHzaXHUlle+sSCDlzEuURwgo=";
+      };
+
       # Fetch the deno runtime binary needed for compile
       denortZip = pkgs.fetchurl {
         url = "https://dl.deno.land/release/v${denoVersion}/denort-${target}.zip";
@@ -71,7 +80,7 @@
 
         outputHashMode = "recursive";
         outputHashAlgo = "sha256";
-        outputHash = "sha256-55DMyYtXKJG3Pu1M7Y5IHzaXHUlle+sSCDlzEuURwgo=";
+        outputHash = denoDepsHashes.${system};
       };
     in {
       default = self.packages.${system}.fmt;
