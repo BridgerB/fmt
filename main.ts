@@ -51,7 +51,7 @@ SUPPORTED LANGUAGES:
 
 CONFIGURATION:
     fmt automatically respects .gitignore patterns. Files ignored by git
-    will not be formatted.
+    will not be formatted. Git submodules are also automatically skipped.
 
     The .gitignore file is searched for starting from the current directory
     and walking up the directory tree.
@@ -60,6 +60,30 @@ EXAMPLES:
     fmt              Format all files in current directory
     fmt --check      Check formatting without modifying files (useful for CI)
 `);
+}
+
+/**
+ * Finds git submodule paths by parsing .gitmodules
+ */
+async function findSubmodulePaths(rootDir: string): Promise<string[]> {
+  const gitmodulesPath = `${rootDir}/.gitmodules`;
+  try {
+    const content = await Deno.readTextFile(gitmodulesPath);
+    const paths: string[] = [];
+
+    // Parse .gitmodules for path = entries
+    for (const line of content.split("\n")) {
+      const match = line.match(/^\s*path\s*=\s*(.+?)\s*$/);
+      if (match) {
+        paths.push(match[1]);
+      }
+    }
+
+    return paths;
+  } catch {
+    // No .gitmodules or can't read it
+    return [];
+  }
 }
 
 /**
@@ -136,25 +160,44 @@ function parseIgnorePatterns(content: string): IgnorePattern[] {
 }
 
 /**
- * Loads ignore patterns from .gitignore
+ * Loads ignore patterns from .gitignore and adds submodule paths
  */
 async function loadIgnorePatterns(startDir: string): Promise<{
   patterns: IgnorePattern[];
   rootDir: string;
+  submodules: string[];
 }> {
   const result = await findGitignore(startDir);
+  const rootDir = result?.rootDir ?? startDir;
+
+  // Find submodules
+  const submodules = await findSubmodulePaths(rootDir);
+
+  let patterns: IgnorePattern[] = [];
+
+  // Add submodule paths as ignore patterns
+  for (const submodule of submodules) {
+    const globPattern = `${submodule}/**`;
+    try {
+      const regex = globToRegExp(globPattern);
+      patterns.push({ pattern: submodule, regex, negated: false });
+    } catch {
+      console.warn(`Warning: invalid submodule path: ${submodule}`);
+    }
+  }
 
   if (!result) {
-    return { patterns: [], rootDir: startDir };
+    return { patterns, rootDir, submodules };
   }
 
   try {
     const content = await Deno.readTextFile(result.filePath);
-    const patterns = parseIgnorePatterns(content);
-    return { patterns, rootDir: result.rootDir };
+    const gitignorePatterns = parseIgnorePatterns(content);
+    patterns = patterns.concat(gitignorePatterns);
+    return { patterns, rootDir: result.rootDir, submodules };
   } catch (error) {
     console.warn(`Warning: failed to read .gitignore: ${error}`);
-    return { patterns: [], rootDir: startDir };
+    return { patterns, rootDir, submodules };
   }
 }
 
@@ -177,17 +220,26 @@ function isIgnored(relativePath: string, patterns: IgnorePattern[]): boolean {
 
 /**
  * Gets raw patterns from .gitignore for passing to deno fmt --ignore
+ * Also includes submodule paths
  */
 async function getRawIgnorePatterns(startDir: string): Promise<string[]> {
   const result = await findGitignore(startDir);
+  const rootDir = result?.rootDir ?? startDir;
+
+  const patterns: string[] = [];
+
+  // Add submodule paths
+  const submodules = await findSubmodulePaths(rootDir);
+  for (const submodule of submodules) {
+    patterns.push(submodule);
+  }
 
   if (!result) {
-    return [];
+    return patterns;
   }
 
   try {
     const content = await Deno.readTextFile(result.filePath);
-    const patterns: string[] = [];
 
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
@@ -213,7 +265,7 @@ async function getRawIgnorePatterns(startDir: string): Promise<string[]> {
 
     return patterns;
   } catch {
-    return [];
+    return patterns;
   }
 }
 
@@ -656,11 +708,15 @@ async function runRustFmt(
 async function run(checkMode: boolean): Promise<void> {
   const cwd = Deno.cwd();
 
-  // Load ignore patterns from .gitignore
-  const { patterns, rootDir } = await loadIgnorePatterns(cwd);
+  // Load ignore patterns from .gitignore and submodules
+  const { patterns, rootDir, submodules } = await loadIgnorePatterns(cwd);
 
   if (patterns.length > 0) {
     console.log(`Using .gitignore from ${rootDir}`);
+  }
+
+  if (submodules.length > 0) {
+    console.log(`Skipping submodules: ${submodules.join(", ")}`);
   }
 
   console.log(
